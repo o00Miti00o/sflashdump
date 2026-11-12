@@ -1,77 +1,161 @@
 # PS5 SFlash Dumper
 
-Payload for jailbroken PlayStation 5 consoles that reads `/dev/sflash0` (NOR flash, ~2 MB), writes **two independent dumps**, and verifies they match with **CRC32**.
+A PS5 payload that makes a verified backup of your console's serial flash (`/dev/sflash0`, 2 MB), decodes the most useful identifiers into a readable text file, and splits the dump into its individual partitions.
 
-Tested with **Relapse** on firmware **12.40**
+**Version:** 1.1.0
+**Tested on:** Relapse / kernel exploit, FW 7.00 – 13.60
+---
 
 ## Features
 
-- Full dump of `/dev/sflash0` (2 MB, 512-byte aligned reads)
-- Two consecutive dumps from the device
-- CRC32 comparison of both files
-- Console notifications: `Make Dump 1...` → `Make Dump 2...` → `Verifying backup...` → matched / not matched
-- Output: USB (`/mnt/usb0/`) preferred, fallback to `/data/`
-- Kernel privilege escalation (uid 0, authid, full caps, root vnode)
-- **Read-only** — does not write to NOR
+- Dumps `/dev/sflash0` **twice** and compares both dumps with **CRC32**, so you know the backup is not corrupted
+- Reads the console serial number and stores everything in a folder named after it
+- Writes `sflash0_info.txt` with decoded, human-readable console info
+- Extracts known partitions into a `parts/` folder
+- Saves to USB (`/mnt/usb0`) when writable, otherwise falls back to `/data`
+- Shows progress as on-console notifications
+- **Read-only:** the tool never writes to the flash
 
-## Requirements
+---
 
-- Jailbroken PS5 with (FW 7.00–13.60)
-- **kstuff-lite** loaded
-- ELF loader on port **9021**
-- Optional: USB drive formatted **exFAT**
-- Build: [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk)
+## Output layout
 
-## Build
+```
+<USB or /data>/
+└── <SERIAL>/
+    ├── sflash0_dump1.bin
+    ├── sflash0_dump2.bin
+    ├── sflash0_info.txt
+    └── parts/
+        ├── active_slot.bin
+        ├── mbr1.bin
+        ├── mbr2.bin
+        ├── emc_ipl_a.bin
+        ├── emc_ipl_b.bin
+        ├── usb_pdc_a.bin
+        ├── usb_pdc_b.bin
+        ├── unk_region.bin
+        ├── nvs.bin
+        └── reserved.bin
+```
 
-```bash
+During the dump, files are written to a temporary `sflash_tmp/` folder. They are moved to the serial-named folder only after both dumps match.
+
+### Partitions
+
+| File | Offset | Size |
+|---|---|---|
+| `active_slot.bin` | `0x001000` | `0x001000` |
+| `mbr1.bin` | `0x002000` | `0x001000` |
+| `mbr2.bin` | `0x003000` | `0x001000` |
+| `emc_ipl_a.bin` | `0x004000` | `0x07E000` |
+| `emc_ipl_b.bin` | `0x082000` | `0x07E000` |
+| `usb_pdc_a.bin` | `0x100000` | `0x010000` |
+| `usb_pdc_b.bin` | `0x110000` | `0x010000` |
+| `unk_region.bin` | `0x120000` | `0x0A4000` |
+| `nvs.bin` | `0x1C4000` | `0x00C000` |
+| `reserved.bin` | `0x1D0000` | `0x030000` |
+
+### Decoded info (`sflash0_info.txt`)
+
+Board ID / motherboard type, model (SKU), model variant, region, serial number, motherboard SN, Kiban ID, SoC UID, LAN / WiFi MAC, Bluetooth addresses, image/PKG ID, active slot, IDU mode, and factory / minimum / current firmware versions.
+
+Offsets come from the PS5 DevWiki and ps5-wee-tools.
+
+---
+
+## Usage
+
+1. *(Optional)* Plug in a USB drive formatted as exFAT or FAT32. If `/mnt/usb0` is not writable, the dump goes to `/data`.
+2. Jailbreak your console with a compatible exploit.
+3. Send `sflash_dump.elf` to your payload loader (default port `9021`).
+4. Wait for the notifications:
+   - `Make Dump 1...`
+   - `Make Dump 2...`
+   - `Verifying backup...`
+   - `Backup MATCHED (CRC OK)`
+   - `Info TXT saved`
+   - `Parts extracted OK`
+5. Copy the `<SERIAL>` folder to a safe place, ideally to more than one.
+
+If you see **`Backup NOT matched!`**, the two dumps differ. Do not trust them. Reboot and run it again.
+
+---
+
+## Building
+
+Requires the [ps5-payload-dev SDK](https://github.com/ps5-payload-dev/sdk).
+
+```sh
 export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
 make
+```
 
-Output: sflash_dump.elf
+Example `Makefile`:
 
-Run
-Run Relapse
-Load kstuff-lite
-(Optional) Insert an exFAT USB drive
-Send the payload:
+```make
+PS5_HOST ?= ps5
+PS5_PORT ?= 9021
 
-bash
-socat -t 30 TCP:PS5_IP:9021 < sflash_dump.elf
-# or
-nc PS5_IP 9021 < sflash_dump.elf
+ifdef PS5_PAYLOAD_SDK
+    include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
+else
+    $(error PS5_PAYLOAD_SDK is undefined)
+endif
 
-Output files
-Location	Files
-USB	/mnt/usb0/sflash0_dump1.bin, sflash0_dump2.bin
-Fallback	/data/sflash0_dump1.bin, sflash0_dump2.bin
-Expected size: 0x200000 (2 MB) each.
+CFLAGS := -Wall
+ELF    := sflash_dump.elf
 
-How it works
-Jailbreak process (root vnode, uid 0, privileged authid, full capabilities)
-Open /dev/sflash0 read-only
-Dump 1 → file 1
-Dump 2 → file 2
-Compute CRC32 on both files
-Notify MATCHED if size and CRC are identical, otherwise NOT matched
-Two dumps + CRC reduce the chance of a silent read error.
+all: $(ELF)
 
-Troubleshooting
-Issue	Check
-Access denied / errno 13	Is kstuff-lite loaded?
-Jailbreak failed	Relapse + kstuff for your FW
-Cannot write output	USB mounted (exFAT) or space under /data
-NOT matched	Retry; do not remove USB during dump
-Disclaimer
-For personal backup and research on your own jailbroken console only.
-Incorrect use of flash data can damage hardware. Use at your own risk.
+$(ELF): sflash_dump.c
+	$(CC) $(CFLAGS) $^ -o $@
 
-Credits
-ps5-payload-dev/sdk
-Relapse / kstuff ecosystem
-earthonion
+clean:
+	rm -f $(ELF)
 
--All PS5 developers-
+test: $(ELF)
+	$(PS5_DEPLOY) -h $(PS5_HOST) -p $(PS5_PORT) $^
+```
 
-License
-MIT (or your choice — add a LICENSE file)
+Send it to the console with:
+
+```sh
+make test PS5_HOST=<console-ip>
+```
+
+---
+
+## How it works
+
+1. Escalates privileges (root, unjailed, extended authid and capabilities) through the SDK's kernel API
+2. Opens `/dev/sflash0` and checks that its size is `0x200000`
+3. Dumps the device twice in 64 KB blocks, aligned to 512-byte sectors
+4. Compares size and CRC32 of both dumps
+5. Reads the serial number at `0x1C7210` and sanitizes it into a folder name (falls back to `UNKNOWN`)
+6. Moves the dumps, writes `sflash0_info.txt` and extracts the partitions
+
+---
+
+## Privacy notice
+
+The dumps and `sflash0_info.txt` contain **console-unique identifiers**: serial number, MAC addresses, SoC UID, Kiban ID and more. **Never upload them publicly** (GitHub issues, Discord, forums), and redact them from screenshots and logs.
+
+---
+
+## Disclaimer
+
+This tool is provided for backup and personal research purposes on hardware you own, **as is and without any warranty**. Use it at your own risk. The author is not responsible for any damage, data loss or bans resulting from its use.
+
+---
+
+## Credits
+
+- [ps5-payload-dev/sdk](https://github.com/ps5-payload-dev/sdk)
+- earthonion for inspiration
+- PS5 DevWiki and ps5-wee-tools for the NVS offsets and partition layout
+- The PS5 jailbreak / exploit community
+
+## License
+
+This project is open source and licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
